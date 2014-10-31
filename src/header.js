@@ -1067,7 +1067,7 @@ function ParticleFilterRejuv(s,k,a, wpplFn, numParticles,rejuvSteps,finalRejuvSt
   this.particles = [];
   this.particleIndex = 0;  // marks the active particle
   this.rejuvSteps = rejuvSteps;
-  this.finalRejuvSteps = finalRejuvSteps==undefined?rejuvSteps:finalRejuvSteps
+  this.finalRejuvSteps = finalRejuvSteps==undefined?0:finalRejuvSteps
   this.baseAddress = a;
   this.wpplFn = wpplFn;
 
@@ -1361,6 +1361,7 @@ function pfr(s,cc, a, wpplFn, numParticles, rejuvSteps) {
   return new ParticleFilterRejuv(s,cc, a, wpplFn, numParticles, rejuvSteps);
 }
 
+//FIXME: mh needs to build the marginal from multiple iterations, currently just keeps last state.
 function mh(s, cc, a, wpplFn, numIterations) {
   return new ParticleFilterRejuv(s,cc, a, wpplFn, 1, 0, numIterations);
 }
