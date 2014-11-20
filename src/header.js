@@ -28,11 +28,13 @@ var globalStore = {};
 // erp.sample(params) returns a value sampled from the distribution.
 // erp.score(params, val) returns the log-probability of val under the distribution.
 // erp.support(params) gives an array of support elements.
+// erp.grad(params, val) gives the gradient of score at val wrt params.
 
-function ERP(sampler, scorer, supporter) {
+function ERP(sampler, scorer, supporter, grad) {
   this.sample = sampler;
   this.score = scorer;
   this.support = supporter;
+  this.grad = grad;
 }
 
 var uniformERP = new ERP(
@@ -55,11 +57,17 @@ var bernoulliERP = new ERP(
     return val;
   },
   function flipScore(params, val) {
+    //FIXME: check domain
     var weight = params[0];
     return val ? Math.log(weight) : Math.log(1 - weight);
   },
   function flipSupport(params) {
     return [true, false];
+  },
+  function flipGrad(params, val) {
+    //FIXME: check domain
+    var weight = params[0];
+    return val ? [1/weight] : [-1/weight]
   }
 );
 
@@ -1370,6 +1378,145 @@ function pf(s,cc, a, wpplFn, numParticles) {
   return new ParticleFilterRejuv(s,cc, a, wpplFn, numParticles, 0);
 }
 
+////////////////////////////////////////////////////////////////////
+// Simple Variational inference wrt the (pseudo)mean-field program.
+// We do stochastic gradient decent on the ERP params.
+// On sample statements: sample and accumulate grad-log-score, orig-score, and variational-score
+// On factor statements accumulate into orig-score.
+
+function Variational(s,k,a, wpplFn, estS) {
+
+  this.wpplFn = wpplFn;
+  this.estimateSamples = estS
+  this.numS = 0
+  this.t = 1
+  this.variationalParams = {}
+  this.grad = {}
+  this.samplegrad = {}
+  this.jointScore = 0
+  this.variScore = 0
+
+  // Move old coroutine out of the way and install this as the current
+  // handler.
+  this.k = k;
+  this.oldCoroutine = coroutine;
+  coroutine = this;
+
+  this.initialStore = s; // will be reinstated at the end
+  this.initialAddress = a
+
+  //kick off the estimation:
+  this.takeGradSample()
+}
+
+Variational.prototype.takeGradSample = function() {
+  //reset sample info
+  coroutine.samplegrad = {}
+  coroutine.jointScore = 0
+  coroutine.variScore = 0
+  //get another sample
+  coroutine.numS++
+  coroutine.wpplFn(coroutine.initialStore, exit, coroutine.initialAddress)
+}
+
+Variational.prototype.sample = function(s,k,a, erp, params) {
+  //sample from variational dist
+  if(!coroutine.variationalParams.hasOwnProperty(a)){
+    //initialize at prior (for this sample)...
+    coroutine.variationalParams[a] = params
+  }
+  var vParams = coroutine.variationalParams[a]
+  var val = erp.sample(vParams)
+
+  //compute variational dist grad
+  coroutine.samplegrad[a] = erp.grad(vParams, val)
+
+  //compute target score + variational score
+  coroutine.jointScore += erp.score(params, val)
+  coroutine.variScore += erp.score(vParams, val)
+
+  k(s,val); //TODO: need a?
+};
+
+Variational.prototype.factor = function(s,k,a, score) {
+
+  //update joint score and keep going
+  coroutine.jointScore += score
+
+  k(s) //TODO: need a?
+};
+
+Variational.prototype.exit = function(s,retval) {
+  //FIXME: params are arrays, so need vector arithmetic or something..
+
+  //update gradient estimate
+  for(var a in coroutine.samplegrad) {
+    if(!coroutine.grad.hasOwnProperty(a)){coroutine.grad[a]=[0]}//FIX
+    coroutine.grad[a] = vecPlus(coroutine.grad[a],
+                          vecScalarMult(coroutine.samplegrad[a],
+                            (coroutine.jointScore - coroutine.variScore)))
+  }
+
+  //do we have as many samples as we need for this gradient estimate?
+  if (coroutine.numS < coroutine.estimateSamples) {
+    coroutine.takeGradSample()
+  }
+
+console.log("vparams: ")
+  console.log(coroutine.variationalParams)
+  console.log("grad: ")
+  console.log(coroutine.grad)
+
+  //we have all our samples to do a gradient step.
+  //update variational parameters:
+  for(var a in coroutine.variationalParams){
+    var ro = 0.01/coroutine.t
+    var delta = vecScalarMult(coroutine.grad[a], (ro / coroutine.numS))
+    coroutine.variationalParams[a] = vecPlus(coroutine.variationalParams[a],delta)
+  }
+  coroutine.t++
+
+  //if we haven't converged then do another gradient estimate and step:
+  //FIXME: converence test instead of fixed number of grad steps?
+  if(coroutine.t<100) {
+    coroutine.grad = {}
+    coroutine.numS = 0
+    coroutine.takeGradSample()
+  }
+
+  //return variational dist as ERP:
+  //FIXME
+  console.log(coroutine.variationalParams)
+  var dist = null
+
+  // Reinstate previous coroutine:
+  var k = coroutine.k;
+  var s = coroutine.initialStore;
+  coroutine = coroutine.oldCoroutine;
+
+  // Return from particle filter by calling original continuation:
+  k(s,dist);
+};
+
+function vecPlus(a,b) {
+  var c = []
+  for(var i=0;i<a.length;i++) {
+    c[i] = a[i]+b[i]
+  }
+  return c
+}
+
+function vecScalarMult(a,s) {
+  var c = []
+  for(var i=0;i<a.length;i++) {
+    c[i] = a[i]*s
+  }
+  return c
+}
+
+function vari(s,cc, a, wpplFn, estS) {
+  return new Variational(s,cc, a, wpplFn, estS);
+}
 
 ////////////////////////////////////////////////////////////////////
 // Some primitive functions to make things simpler
@@ -1449,6 +1596,7 @@ module.exports = {
   multinomialSample: multinomialSample,
   PMCMC: pmc,
   ParticleFilterRejuv: pfr,
+  Variational: vari,
   util: util,
   withEmptyStack: withEmptyWebPPLStack,
   getAddress: getAddress
